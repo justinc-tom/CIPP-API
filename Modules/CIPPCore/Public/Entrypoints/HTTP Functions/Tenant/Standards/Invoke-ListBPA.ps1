@@ -19,7 +19,6 @@ Function Invoke-ListBPA {
 
     # Get all possible JSON files for reports, find the correct one, select the Columns
     $JSONFields = @()
-    $Columns = $null
     $BPATemplateTable = Get-CippTable -tablename 'templates'
     $Filter = "PartitionKey eq 'BPATemplate'"
     $Templates = (Get-CIPPAzDataTableEntity @BPATemplateTable -Filter $Filter).JSON | ConvertFrom-Json
@@ -41,8 +40,11 @@ Function Invoke-ListBPA {
             $row = $_
             $JSONFields | ForEach-Object {
                 $jsonContent = $row.$_
-                if ($jsonContent -ne $null -and $jsonContent -ne 'FAILED') {
-                    $row.$_ = $jsonContent | ConvertFrom-Json -Depth 15
+                if (![string]::IsNullOrEmpty($jsonContent) -and $jsonContent -ne 'FAILED') {
+                    try {
+                        $row.$_ = $jsonContent | ConvertFrom-Json -Depth 15
+                    } catch {
+                    }
                 }
             }
             $row.PSObject.Properties | ForEach-Object {
@@ -62,8 +64,11 @@ Function Invoke-ListBPA {
             $row = $_
             $JSONFields | ForEach-Object {
                 $jsonContent = $row.$_
-                if ($jsonContent -ne $null -and $jsonContent -ne 'FAILED') {
-                    $row.$_ = $jsonContent | ConvertFrom-Json -Depth 15
+                if (![string]::IsNullOrEmpty($jsonContent) -and $jsonContent -ne 'FAILED') {
+                    try {
+                        $row.$_ = $jsonContent | ConvertFrom-Json -Depth 15
+                    } catch {
+                    }
                 }
             }
             $row | Where-Object -Property PartitionKey -In $Tenants.customerId
@@ -74,7 +79,12 @@ Function Invoke-ListBPA {
 
     $Results = [PSCustomObject]@{
         Data    = @($Data)
-        Columns = $Columns
+        Columns = @($Columns)
+        Keys    = $Data | ForEach-Object {
+            $_.PSObject.Properties |
+            Where-Object { $_.Name -ne 'PartitionKey' -and $_.Name -ne 'RowKey' -and $_.Name -ne 'Timestamp' } |
+            ForEach-Object { $_.Name }
+        } | Select-Object -Unique
         Style   = $Style
     }
 
@@ -82,6 +92,7 @@ Function Invoke-ListBPA {
         $Results = @{
             Columns = @( value = 'Results'; name = 'Results')
             Data    = @(@{ Results = 'The BPA has not yet run.' })
+            Keys    = @()
         }
     }
 
