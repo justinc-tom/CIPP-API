@@ -23,78 +23,15 @@ function Set-CIPPDBCacheIntuneAppInstallStatus {
         [string]$QueueId
     )
 
-    $ReportName = 'AppInstallStatusAggregate'
-
+    $Export = $null
     try {
-        $JobsTable = Get-CIPPTable -tablename 'IntuneReportJobs'
-        $JobRow = Get-CIPPAzDataTableEntity @JobsTable -Filter "PartitionKey eq '$TenantFilter' and RowKey eq '$ReportName'"
+        $Export = Get-CIPPIntuneReportExportJob -TenantFilter $TenantFilter -ReportName 'AppInstallStatusAggregate'
+        if (-not $Export) { return }
 
-        if (-not $JobRow) {
-            Write-LogMessage -API 'CIPPDBCache' -tenant $TenantFilter -message "No $ReportName job submitted - skipping app install status cache" -sev Info
-            return
-        }
-
-        $JobId = $JobRow.JobId
-        if (-not $JobId) {
-            Write-LogMessage -API 'CIPPDBCache' -tenant $TenantFilter -message 'IntuneReportJobs row missing JobId - removing' -sev Warning
-            Remove-AzDataTableEntity @JobsTable -Entity $JobRow -Force -ErrorAction SilentlyContinue
-            return
-        }
-
-        try {
-            $Job = New-GraphGetRequest -uri "https://graph.microsoft.com/beta/deviceManagement/reports/exportJobs/$JobId" -tenantid $TenantFilter
-        } catch {
-            $ErrorMessage = Get-CippException -Exception $_
-            Write-LogMessage -API 'CIPPDBCache' -tenant $TenantFilter -message "$ReportName job $JobId not retrievable: $($ErrorMessage.NormalizedError)" -sev Warning -LogData $ErrorMessage
-            Remove-AzDataTableEntity @JobsTable -Entity $JobRow -Force -ErrorAction SilentlyContinue
-            return
-        }
-
-        switch ($Job.status) {
-            'completed' { }
-            'failed' {
-                Write-LogMessage -API 'CIPPDBCache' -tenant $TenantFilter -message "$ReportName job $JobId failed" -sev Error
-                Remove-AzDataTableEntity @JobsTable -Entity $JobRow -Force -ErrorAction SilentlyContinue
-                return
-            }
-            default {
-                Write-LogMessage -API 'CIPPDBCache' -tenant $TenantFilter -message "$ReportName job $JobId still '$($Job.status)' - skipping" -sev Info
-                return
-            }
-        }
-
-        if (-not $Job.url) {
-            Write-LogMessage -API 'CIPPDBCache' -tenant $TenantFilter -message "$ReportName job $JobId completed but no url returned" -sev Error
-            Remove-AzDataTableEntity @JobsTable -Entity $JobRow -Force -ErrorAction SilentlyContinue
-            return
-        }
-
-        $ZipBytes = (Invoke-WebRequest -Uri $Job.url -UseBasicParsing -ErrorAction Stop).Content
-        if ($ZipBytes -isnot [byte[]]) { throw "Expected binary content from $ReportName download" }
-
-        $JsonText = $null
-        $ZipStream = [System.IO.MemoryStream]::new($ZipBytes, $false)
-        try {
-            $Archive = [System.IO.Compression.ZipArchive]::new($ZipStream, [System.IO.Compression.ZipArchiveMode]::Read)
-            try {
-                $Entry = $Archive.Entries | Where-Object { $_.Name -like '*.json' } | Select-Object -First 1
-                if (-not $Entry) { throw "No JSON entry in $ReportName archive" }
-                $EntryStream = $Entry.Open()
-                try {
-                    $Reader = [System.IO.StreamReader]::new($EntryStream)
-                    try { $JsonText = $Reader.ReadToEnd() } finally { $Reader.Dispose() }
-                } finally { $EntryStream.Dispose() }
-            } finally { $Archive.Dispose() }
-        } finally {
-            $ZipStream.Dispose()
-            $ZipBytes = $null
-        }
-
-        $ExportRows = @(($JsonText | ConvertFrom-Json).values)
-        $JsonText = $null
-
-        $AppStatuses = foreach ($Row in $ExportRows) {
-            if (-not $Row.ApplicationId) { continue }
+        # Rows stream off the export download, so only the rollup rows are ever held.
+        $AppStatuses = Get-CIPPIntuneReportExportRows -Url $Export.Url | ForEach-Object {
+            $Row = $_
+            if (-not $Row.ApplicationId) { return }
             [pscustomobject]@{
                 id                        = $Row.ApplicationId
                 displayName               = $Row.DisplayName
@@ -112,11 +49,14 @@ function Set-CIPPDBCacheIntuneAppInstallStatus {
         $AppStatuses = @($AppStatuses)
 
         Add-CIPPDbItem -TenantFilter $TenantFilter -Type 'IntuneAppInstallStatusAggregate' -Data $AppStatuses -AddCount
-        Write-LogMessage -API 'CIPPDBCache' -tenant $TenantFilter -message "Cached $($AppStatuses.Count) app install status rows from export $JobId" -sev Info
-
-        Remove-AzDataTableEntity @JobsTable -Entity $JobRow -Force -ErrorAction SilentlyContinue
+        Write-LogMessage -API 'CIPPDBCache' -tenant $TenantFilter -message "Cached $($AppStatuses.Count) app install status rows from export $($Export.JobId)" -sev Info
     } catch {
         $ErrorMessage = Get-CippException -Exception $_
         Write-LogMessage -API 'CIPPDBCache' -tenant $TenantFilter -message "Failed to cache app install status: $($ErrorMessage.NormalizedError)" -sev Error -LogData $ErrorMessage
+    } finally {
+        if ($Export) {
+            $JobsTable = Get-CIPPTable -tablename 'IntuneReportJobs'
+            Remove-CIPPAzDataTableEntity @JobsTable -Entity $Export.Row -Force -ErrorAction SilentlyContinue
+        }
     }
 }
